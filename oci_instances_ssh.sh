@@ -60,4 +60,22 @@ done < "$TEMP_FILE"
 
 rm -f "$TEMP_FILE"
 
+BASTION_STATUS="Disabled"
+
+PLUGIN_JSON=$(oci compute instance-agent plugin list \
+    --compartment-id "$COMP_ID" \
+    --instance-id "$INSTANCE_ID" 2>/dev/null || echo "")
+
+if [ -n "$PLUGIN_JSON" ]; then
+    BASTION_PLUGIN=$(echo "$PLUGIN_JSON" | jq -r '
+        .data[]?
+        | select(."name"=="Bastion")
+        | ."status"
+    ')
+
+    if [[ "$BASTION_PLUGIN" == "RUNNING" || "$BASTION_PLUGIN" == "ENABLED" ]]; then
+        BASTION_STATUS="Enabled"
+    fi
+fi
+
 echo "CSV generated: $OUTPUT_FILE"
