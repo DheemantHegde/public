@@ -286,3 +286,113 @@ jq -c '.[]' "$TMP_COMPARTMENTS" | while read -r comp; do
         echo "\"$COMP_NAME\",\"$BOOT_VOL_NAME\",\"$KMS_KEY_NAME\",\"$KMS_COMP\",\"$VAULT_NAME\",\"$VAULT_COMP\""
     done
 done
+
+
+
+
+#######
+#!/bin/bash
+set -euo pipefail
+
+PROFILE="${PROFILE:-DEFAULT}"
+
+COMP_FILE="/tmp/oci_compartments.json"
+VAULT_FILE="/tmp/oci_vaults.json"
+
+############################################
+# Get all compartments
+############################################
+echo "Fetching compartments..." >&2
+
+oci --profile "$PROFILE" iam compartment list \
+    --all \
+    --compartment-id-in-subtree true \
+    --access-level ACCESSIBLE \
+    --query 'data[].{name:name,id:id}' \
+    > "$COMP_FILE"
+
+############################################
+# Fetch all vaults from all compartments
+############################################
+echo "Fetching vaults..." >&2
+echo "[]" > "$VAULT_FILE"
+
+jq -c '.[]' "$COMP_FILE" | while read -r comp; do
+    COMP_ID=$(echo "$comp" | jq -r '.id')
+
+    VAULTS=$(oci --profile "$PROFILE" kms management vault list \
+        --compartment-id "$COMP_ID" \
+        --all 2>/dev/null || echo '{"data":[]}')
+
+    TMP=$(mktemp)
+
+    jq -s '.[0] + .[1].data' \
+        "$VAULT_FILE" \
+        <(echo "$VAULTS") > "$TMP"
+
+    mv "$TMP" "$VAULT_FILE"
+done
+
+############################################
+# CSV Header
+############################################
+echo "compartment_name,boot_volume_name,kms_key_name,kms_compartment,vault_name,vault_compartment"
+
+############################################
+# Process boot volumes
+############################################
+jq -c '.[]' "$COMP_FILE" | while read -r comp; do
+    COMP_ID=$(echo "$comp" | jq -r '.id')
+    COMP_NAME=$(echo "$comp" | jq -r '.name')
+
+    echo "Scanning compartment: $COMP_NAME" >&2
+
+    BOOT_VOLUMES=$(oci --profile "$PROFILE" bv boot-volume list \
+        --compartment-id "$COMP_ID" \
+        --all 2>/dev/null || echo '{"data":[]}')
+
+    echo "$BOOT_VOLUMES" | jq -c '.data[]?' | while read -r vol; do
+        BOOT_VOL_NAME=$(echo "$vol" | jq -r '."display-name"')
+        KMS_KEY_ID=$(echo "$vol" | jq -r '."kms-key-id" // empty')
+
+        KMS_KEY_NAME=""
+        KMS_COMP=""
+        VAULT_NAME=""
+        VAULT_COMP=""
+
+        if [[ -n "$KMS_KEY_ID" ]]; then
+
+            FOUND=0
+
+            while read -r vault; do
+                ENDPOINT=$(echo "$vault" | jq -r '."management-endpoint"')
+                CURR_VAULT_NAME=$(echo "$vault" | jq -r '."display-name"')
+                VAULT_COMP_ID=$(echo "$vault" | jq -r '."compartment-id"')
+
+                KEY_JSON=$(oci --profile "$PROFILE" kms management key get \
+                    --key-id "$KMS_KEY_ID" \
+                    --endpoint "$ENDPOINT" 2>/dev/null || true)
+
+                if [[ -n "$KEY_JSON" ]]; then
+                    KMS_KEY_NAME=$(echo "$KEY_JSON" | jq -r '.data."display-name"')
+                    KMS_COMP_ID=$(echo "$KEY_JSON" | jq -r '.data."compartment-id"')
+
+                    KMS_COMP=$(jq -r \
+                        ".[] | select(.id==\"$KMS_COMP_ID\") | .name" \
+                        "$COMP_FILE")
+
+                    VAULT_NAME="$CURR_VAULT_NAME"
+
+                    VAULT_COMP=$(jq -r \
+                        ".[] | select(.id==\"$VAULT_COMP_ID\") | .name" \
+                        "$COMP_FILE")
+
+                    FOUND=1
+                    break
+                fi
+            done < <(jq -c '.[]' "$VAULT_FILE")
+        fi
+
+        echo "\"$COMP_NAME\",\"$BOOT_VOL_NAME\",\"$KMS_KEY_NAME\",\"$KMS_COMP\",\"$VAULT_NAME\",\"$VAULT_COMP\""
+    done
+done
