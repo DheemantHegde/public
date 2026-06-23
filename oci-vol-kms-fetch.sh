@@ -219,3 +219,70 @@ jq -c '.[]' "$TMP_COMPARTMENTS" | while read -r comp; do
         echo "\"$COMP_NAME\",\"$INSTANCE_NAME\",\"$KEY_NAME\",\"$KEY_COMP\",\"$VAULT_NAME\",\"$VAULT_COMP\""
     done
 done
+####
+
+#!/bin/bash
+set -euo pipefail
+
+PROFILE="${PROFILE:-DEFAULT}"
+TMP_COMPARTMENTS="/tmp/oci_compartments.json"
+
+# Get all compartments
+oci --profile "$PROFILE" iam compartment list \
+    --all \
+    --compartment-id-in-subtree true \
+    --access-level ACCESSIBLE \
+    --query 'data[].{name:name,id:id}' \
+    > "$TMP_COMPARTMENTS"
+
+echo "compartment_name,boot_volume_name,kms_key_name,kms_compartment,vault_name,vault_compartment"
+
+jq -c '.[]' "$TMP_COMPARTMENTS" | while read -r comp; do
+    COMP_ID=$(echo "$comp" | jq -r '.id')
+    COMP_NAME=$(echo "$comp" | jq -r '.name')
+
+    BOOT_VOLUMES=$(oci --profile "$PROFILE" bv boot-volume list \
+        --compartment-id "$COMP_ID" \
+        --all 2>/dev/null || echo '{"data":[]}')
+
+    echo "$BOOT_VOLUMES" | jq -c '.data[]?' | while read -r vol; do
+        BOOT_VOL_NAME=$(echo "$vol" | jq -r '."display-name"')
+        KMS_KEY_ID=$(echo "$vol" | jq -r '."kms-key-id" // empty')
+
+        KMS_KEY_NAME=""
+        KMS_COMP=""
+        VAULT_NAME=""
+        VAULT_COMP=""
+
+        if [[ -n "$KMS_KEY_ID" ]]; then
+            KEY_JSON=$(oci --profile "$PROFILE" kms management key get \
+                --key-id "$KMS_KEY_ID" 2>/dev/null || echo '{}')
+
+            KMS_KEY_NAME=$(echo "$KEY_JSON" | jq -r '.data."display-name" // ""')
+            KMS_COMP_ID=$(echo "$KEY_JSON" | jq -r '.data."compartment-id" // ""')
+            VAULT_ID=$(echo "$KEY_JSON" | jq -r '.data."vault-id" // ""')
+
+            if [[ -n "$KMS_COMP_ID" ]]; then
+                KMS_COMP=$(jq -r \
+                    ".[] | select(.id==\"$KMS_COMP_ID\") | .name" \
+                    "$TMP_COMPARTMENTS")
+            fi
+
+            if [[ -n "$VAULT_ID" ]]; then
+                VAULT_JSON=$(oci --profile "$PROFILE" kms management vault get \
+                    --vault-id "$VAULT_ID" 2>/dev/null || echo '{}')
+
+                VAULT_NAME=$(echo "$VAULT_JSON" | jq -r '.data."display-name" // ""')
+                VAULT_COMP_ID=$(echo "$VAULT_JSON" | jq -r '.data."compartment-id" // ""')
+
+                if [[ -n "$VAULT_COMP_ID" ]]; then
+                    VAULT_COMP=$(jq -r \
+                        ".[] | select(.id==\"$VAULT_COMP_ID\") | .name" \
+                        "$TMP_COMPARTMENTS")
+                fi
+            fi
+        fi
+
+        echo "\"$COMP_NAME\",\"$BOOT_VOL_NAME\",\"$KMS_KEY_NAME\",\"$KMS_COMP\",\"$VAULT_NAME\",\"$VAULT_COMP\""
+    done
+done
